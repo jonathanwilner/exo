@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import multiprocessing as mp
 from dataclasses import dataclass, field
