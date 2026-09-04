@@ -15,6 +15,7 @@ class InstanceId(Id):
 class InstanceMeta(str, Enum):
     MlxRing = "MlxRing"
     MlxJaccl = "MlxJaccl"
+    VllmSidecar = "VllmSidecar"
 
 
 class BaseInstance(TaggedModel):
@@ -35,8 +36,11 @@ class MlxJacclInstance(BaseInstance):
     jaccl_coordinators: dict[NodeId, str]
 
 
-# TODO: Single node instance
-Instance = MlxRingInstance | MlxJacclInstance
+class VllmSidecarInstance(BaseInstance):
+    """An Exo runner that delegates the complete model to a vLLM API sidecar."""
+
+
+Instance = MlxRingInstance | MlxJacclInstance | VllmSidecarInstance
 
 
 class BoundInstance(FrozenModel):

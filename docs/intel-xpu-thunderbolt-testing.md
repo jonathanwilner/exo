@@ -86,6 +86,92 @@ Use the builders for orchestration tests. A real two-node acceptance test must
 still prove that XCCL byte counters increase on the physical `thunderbolt0`
 interfaces and that cable removal reconstructs the distributed instance.
 
+## Exo vLLM sidecar
+
+Exo now has a `VllmSidecar` instance type. The Exo runner sends complete text
+generation requests to the vLLM OpenAI-compatible streaming endpoint. vLLM owns
+model execution, tensor parallelism, pipeline parallelism, Ray, and XCCL. Exo
+continues to own placement, model download state, request routing, cancellation,
+and client-facing API formats.
+
+The sidecar supports two modes:
+
+- Managed mode is the default. The runner starts `vllm serve`, waits for
+  `/health`, streams requests, and terminates the complete process group during
+  runner shutdown.
+- External mode is enabled by `EXO_VLLM_SIDECAR_URL`. Exo waits for and uses the
+  supplied service. Exo never terminates an external service.
+
+Select **Intel vLLM** in the dashboard advanced launch options, or request the
+placement through the API:
+
+```bash
+curl -X POST http://127.0.0.1:52415/place_instance \
+  -H 'content-type: application/json' \
+  -d '{
+    "model_id": "Qwen/Qwen3-1.7B",
+    "sharding": "Pipeline",
+    "instance_meta": "VllmSidecar",
+    "min_nodes": 1
+  }'
+```
+
+`VllmSidecar` requires a model card that includes `Vllm` and a node that reports
+`Backend.Vllm`. Exo deliberately represents the sidecar as one placement node.
+For a multi-node Ray cluster, point that placement node at the vLLM head. Ray
+and vLLM account for the remote Intel XPU workers.
+
+### Managed sidecar environment
+
+The common Panther Lake settings are:
+
+```bash
+export EXO_ENABLE_VLLM_SIDECAR=true
+export EXO_VLLM_INTERFACE=thunderbolt0
+export EXO_VLLM_HOST_IP=192.168.253.1
+export EXO_VLLM_HEAD_IP=192.168.253.1
+export EXO_VLLM_TENSOR_PARALLEL_SIZE=2
+export EXO_VLLM_PIPELINE_PARALLEL_SIZE=1
+export EXO_VLLM_MAX_MODEL_LENGTH=512
+export EXO_VLLM_GPU_MEMORY_UTILIZATION=0.15
+export EXO_VLLM_KV_CACHE_MEMORY_BYTES=67108864
+export EXO_VLLM_ENFORCE_EAGER=true
+export EXO_VLLM_DTYPE=bfloat16
+export EXO_VLLM_TRUST_REMOTE_CODE=true
+export EXO_VLLM_EXECUTABLE=/path/to/vllm
+```
+
+`EXO_VLLM_EXTRA_ARGUMENTS` adds arguments without invoking a shell. Startup and
+request bounds are controlled by `EXO_VLLM_STARTUP_TIMEOUT_SECONDS` and
+`EXO_VLLM_REQUEST_TIMEOUT_SECONDS`. The default endpoint is
+`http://127.0.0.1:8000`.
+
+Experimental Level Zero variables remain explicit. Exo does not add them:
+
+```bash
+export NEOReadDebugKeys=1
+export CreateMultipleRootDevices=2
+export ForcePreemptionMode=3
+```
+
+### External Thunderbolt cluster
+
+Start the Ray head and Ray workers on their `thunderbolt0` addresses. Start one
+vLLM API server on the Ray head, then attach Exo:
+
+```bash
+export EXO_VLLM_SIDECAR_URL=http://192.168.253.1:8000
+uv run exo
+```
+
+Either `EXO_ENABLE_VLLM_SIDECAR=true` or a non-empty
+`EXO_VLLM_SIDECAR_URL` makes the node advertise `Backend.Vllm`. The URL form is
+useful when Exo and vLLM run in separate Python or Nix environments.
+
+Cancellation closes Exo's active HTTP response. vLLM therefore receives a
+client disconnect and aborts the request. Shutdown waits for managed request
+threads, then terminates only the managed vLLM process group.
+
 ## Verified Panther Lake smoke result
 
 On 4 September 2026, an Intel Arc B390 Panther Lake system completed these
@@ -96,8 +182,16 @@ bounded checks with `NEOReadDebugKeys=1`, `CreateMultipleRootDevices=2`, and
 - Two XCCL ranks completed an all-reduce with the expected values.
 - vLLM `0.21.1.dev0` loaded a 1.5B BF16 model with tensor parallel size 2.
 - The OpenAI-compatible completion endpoint returned HTTP 200.
+- The Exo sidecar adapter passed a real streamed request through an SSH tunnel,
+  preserved final token usage, and returned `FinishedResponse`.
+- A second live request was cancelled after its first token. The adapter closed
+  the active HTTP response and returned only `CancelledResponse`.
 - The checked kernel-log window contained no matching `xe` GPU fault, reset, or
   hang.
+
+The live CLI also confirmed that this vLLM build selects Intel XPU through
+`VLLM_TARGET_DEVICE=xpu`. vLLM `0.21.1.dev0` rejects the older `--device xpu`
+serve argument, so the generated command does not include that argument.
 
 This result proves a useful single-machine functional test. It does not prove
 two-machine correctness, Thunderbolt bandwidth, or production stability.

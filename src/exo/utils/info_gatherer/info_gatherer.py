@@ -392,6 +392,17 @@ def _has_torch_xpu() -> bool:
         return False
 
 
+def _vllm_sidecar_is_configured() -> bool:
+    if os.environ.get("EXO_VLLM_SIDECAR_URL"):
+        return True
+    return os.environ.get("EXO_ENABLE_VLLM_SIDECAR", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 class NodeBackends(TaggedModel):
     backends: list[Backend]
 
@@ -406,7 +417,7 @@ class NodeBackends(TaggedModel):
         )
         if has_nvml_cuda:
             backends.append(Backend.MlxCuda)
-        if has_nvml_cuda or has_torch_xpu:
+        if has_nvml_cuda or has_torch_xpu or _vllm_sidecar_is_configured():
             backends.append(Backend.Vllm)
         return cls(backends=backends)
 

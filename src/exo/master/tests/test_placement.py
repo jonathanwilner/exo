@@ -48,6 +48,7 @@ from exo.shared.types.worker.instances import (
     InstanceMeta,
     MlxJacclInstance,
     MlxRingInstance,
+    VllmSidecarInstance,
 )
 from exo.shared.types.worker.runners import ShardAssignments
 from exo.shared.types.worker.shards import PipelineShardMetadata, Sharding
@@ -978,6 +979,75 @@ def test_placement_rejects_when_model_backends_disjoint_from_engine(
     with pytest.raises(ValueError, match="cannot satisfy engine MlxRing"):
         place_instance(
             cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+        )
+
+
+def test_vllm_sidecar_placement_requires_vllm_backend() -> None:
+    topology = Topology()
+    node_id = NodeId("vllm-node")
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(1000 * 1024)}
+    node_network = {node_id: create_node_network()}
+    card = ModelCard(
+        model_id=ModelId("Qwen/Qwen3-1.7B"),
+        storage_size=Memory.from_kb(1000),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        backends=[Backend.Vllm],
+    )
+    command = PlaceInstance(
+        command_id=CommandId("place-vllm"),
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.VllmSidecar,
+        min_nodes=1,
+    )
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        {node_id: [Backend.Vllm]},
+    )
+
+    placed = next(iter(placements.values()))
+    assert isinstance(placed, VllmSidecarInstance)
+    assert set(placed.shard_assignments.node_to_runner) == {node_id}
+
+
+@pytest.mark.parametrize(
+    ("sharding", "min_nodes", "message"),
+    [
+        (Sharding.Tensor, 1, "requires Pipeline sharding"),
+        (Sharding.Pipeline, 2, "requires min_nodes=1"),
+    ],
+)
+def test_vllm_sidecar_rejects_exo_level_distribution(
+    sharding: Sharding, min_nodes: int, message: str, model_card: ModelCard
+) -> None:
+    topology = Topology()
+    node_id = NodeId("vllm-node")
+    topology.add_node(node_id)
+    command = PlaceInstance(
+        command_id=CommandId("place-vllm"),
+        model_card=model_card.model_copy(update={"backends": [Backend.Vllm]}),
+        sharding=sharding,
+        instance_meta=InstanceMeta.VllmSidecar,
+        min_nodes=min_nodes,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        place_instance(
+            command,
+            topology,
+            {},
+            {node_id: create_node_memory(1000 * 1024)},
+            {node_id: create_node_network()},
+            {node_id: [Backend.Vllm]},
         )
 
 

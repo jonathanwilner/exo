@@ -16,7 +16,7 @@
   type InstanceWrapper = {
     MlxRingInstance?: Instance;
     MlxJacclInstance?: Instance;
-    VllmInstance?: Instance;
+    VllmSidecarInstance?: Instance;
   };
 
   let interval: ReturnType<typeof setInterval> | null = null;
@@ -46,7 +46,7 @@
       const inst =
         wrapper.MlxRingInstance ??
         wrapper.MlxJacclInstance ??
-        wrapper.VllmInstance;
+        wrapper.VllmSidecarInstance;
       const modelId = inst?.shardAssignments?.modelId ?? "";
       const nodeToRunner = inst?.shardAssignments?.nodeToRunner ?? {};
       const nodeIds = Object.keys(nodeToRunner);

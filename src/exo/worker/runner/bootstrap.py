@@ -65,7 +65,17 @@ def entrypoint(
         from exo.worker.runner.runner import Runner
 
         builder: Builder
-        if bound_instance.is_image_model:
+        from exo.shared.types.worker.instances import VllmSidecarInstance
+
+        if isinstance(bound_instance.instance, VllmSidecarInstance):
+            from exo.worker.engines.vllm_xpu.sidecar import VllmSidecarBuilder
+
+            builder = VllmSidecarBuilder(
+                model_id=bound_instance.bound_shard.model_card.model_id,
+                event_sender=event_sender_downcast,
+                cancel_receiver=cancel_receiver,
+            )
+        elif bound_instance.is_image_model:
             from exo.worker.engines.image.builder import MfluxBuilder
 
             builder = MfluxBuilder(

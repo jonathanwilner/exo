@@ -886,7 +886,7 @@
   }
 
   let selectedSharding = $state<"Pipeline" | "Tensor">("Pipeline");
-  type InstanceMeta = "MlxRing" | "MlxJaccl";
+  type InstanceMeta = "MlxRing" | "MlxJaccl" | "VllmSidecar";
 
   // Launch defaults persistence
   const LAUNCH_DEFAULTS_KEY = "exo-launch-defaults-v2";
@@ -930,13 +930,18 @@
     if (!defaults) return;
 
     // Apply sharding and instance type unconditionally
-    selectedSharding = defaults.sharding;
-    selectedInstanceType =
-      defaults.instanceType === "MlxRing" ? "MlxRing" : "MlxJaccl";
+    selectedInstanceType = ["MlxRing", "MlxJaccl", "VllmSidecar"].includes(
+      defaults.instanceType,
+    )
+      ? defaults.instanceType
+      : "MlxRing";
+    selectedSharding =
+      selectedInstanceType === "VllmSidecar" ? "Pipeline" : defaults.sharding;
 
     // Apply minNodes if valid (between 1 and maxNodes)
     if (
       defaults.minNodes &&
+      selectedInstanceType !== "VllmSidecar" &&
       defaults.minNodes >= 1 &&
       defaults.minNodes <= maxNodes
     ) {
@@ -1146,9 +1151,7 @@
   }
 
   const matchesSelectedRuntime = (runtime: InstanceMeta): boolean =>
-    selectedInstanceType === "MlxRing"
-      ? runtime === "MlxRing"
-      : runtime === "MlxJaccl";
+    selectedInstanceType === runtime;
 
   // Helper to check if a model can be launched (has valid placement with >= minNodes)
   function canModelFit(modelId: string): boolean {
@@ -2066,6 +2069,8 @@
     let instanceType = "Unknown";
     if (instanceTag === "MlxRingInstance") instanceType = "MLX Ring";
     else if (instanceTag === "MlxJacclInstance") instanceType = "MLX RDMA";
+    else if (instanceTag === "VllmSidecarInstance")
+      instanceType = "Intel vLLM Sidecar";
 
     const inst = instance as {
       shardAssignments?: {
@@ -3157,7 +3162,9 @@
   }
 
   // Available min nodes options based on topology (like old dashboard)
-  const availableMinNodes = $derived(Math.max(1, nodeCount));
+  const availableMinNodes = $derived(
+    selectedInstanceType === "VllmSidecar" ? 1 : Math.max(1, nodeCount),
+  );
 
   // Compute which min node values have valid previews for the current model/sharding/instance type
   // A minNodes value N is valid if there exists a placement with nodeCount >= N
@@ -5751,13 +5758,17 @@
                       </button>
                       <button
                         onclick={() => {
+                          if (selectedInstanceType === "VllmSidecar") return;
                           selectedSharding = "Tensor";
                           saveLaunchDefaults();
                         }}
+                        disabled={selectedInstanceType === "VllmSidecar"}
                         class="flex items-center gap-2 py-1.5 px-3 text-xs font-mono border rounded transition-all duration-200 cursor-pointer {selectedSharding ===
                         'Tensor'
                           ? 'bg-transparent text-exo-yellow border-exo-yellow'
-                          : 'bg-transparent text-white/70 border-exo-medium-gray/50 hover:border-exo-yellow/50'}"
+                          : selectedInstanceType === 'VllmSidecar'
+                            ? 'bg-transparent text-white/20 border-exo-medium-gray/20 cursor-not-allowed'
+                            : 'bg-transparent text-white/70 border-exo-medium-gray/50 hover:border-exo-yellow/50'}"
                       >
                         <span
                           class="w-3 h-3 rounded-full border-2 flex items-center justify-center {selectedSharding ===
@@ -5775,10 +5786,10 @@
                     </div>
                   </div>
 
-                  <!-- Interconnect -->
+                  <!-- Runtime and interconnect -->
                   <div>
                     <div class="text-xs text-white/50 font-mono mb-2">
-                      Interconnect:
+                      Runtime / Interconnect:
                     </div>
                     <div class="flex gap-2">
                       <button
@@ -5826,6 +5837,31 @@
                           {/if}
                         </span>
                         RDMA (Fast)
+                      </button>
+                      <button
+                        onclick={() => {
+                          selectedInstanceType = "VllmSidecar";
+                          selectedSharding = "Pipeline";
+                          selectedMinNodes = 1;
+                          saveLaunchDefaults();
+                        }}
+                        class="flex items-center gap-2 py-1.5 px-3 text-xs font-mono border rounded transition-all duration-200 cursor-pointer {selectedInstanceType ===
+                        'VllmSidecar'
+                          ? 'bg-transparent text-exo-yellow border-exo-yellow'
+                          : 'bg-transparent text-white/70 border-exo-medium-gray/50 hover:border-exo-yellow/50'}"
+                      >
+                        <span
+                          class="w-3 h-3 rounded-full border-2 flex items-center justify-center {selectedInstanceType ===
+                          'VllmSidecar'
+                            ? 'border-exo-yellow'
+                            : 'border-exo-medium-gray'}"
+                        >
+                          {#if selectedInstanceType === "VllmSidecar"}
+                            <span class="w-1.5 h-1.5 rounded-full bg-exo-yellow"
+                            ></span>
+                          {/if}
+                        </span>
+                        Intel vLLM
                       </button>
                     </div>
                   </div>

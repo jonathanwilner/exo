@@ -44,6 +44,7 @@ from exo.shared.types.worker.instances import (
     InstanceMeta,
     MlxJacclInstance,
     MlxRingInstance,
+    VllmSidecarInstance,
 )
 from exo.shared.types.worker.shards import Sharding
 from exo.utils.ports import random_ephemeral_port
@@ -51,6 +52,7 @@ from exo.utils.ports import random_ephemeral_port
 INSTANCE_META_BACKENDS: dict[InstanceMeta, list[Backend]] = {
     InstanceMeta.MlxRing: [Backend.MlxMetal, Backend.MlxCuda, Backend.MlxCpu],
     InstanceMeta.MlxJaccl: [Backend.MlxMetal],
+    InstanceMeta.VllmSidecar: [Backend.Vllm],
 }
 
 
@@ -114,8 +116,16 @@ def place_instance(
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] | None = None,
 ) -> dict[InstanceId, Instance]:
+    if command.instance_meta == InstanceMeta.VllmSidecar:
+        if command.min_nodes != 1:
+            raise ValueError("VllmSidecar placement requires min_nodes=1")
+        if command.sharding != Sharding.Pipeline:
+            raise ValueError("VllmSidecar placement requires Pipeline sharding")
+
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+    if command.instance_meta == InstanceMeta.VllmSidecar:
+        candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
 
     # Filter to cycles containing all required nodes (subset matching)
     if required_nodes:
@@ -243,7 +253,7 @@ def place_instance(
     )
 
     # Single-node: force Pipeline/Ring (Tensor and Jaccl require multi-node)
-    if len(selected_cycle) == 1:
+    if len(selected_cycle) == 1 and command.instance_meta != InstanceMeta.VllmSidecar:
         command = command.model_copy(
             update={
                 "instance_meta": InstanceMeta.MlxRing,
@@ -306,6 +316,11 @@ def place_instance(
                 shard_assignments=shard_assignments,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
+            )
+        case InstanceMeta.VllmSidecar:
+            target_instances[instance_id] = VllmSidecarInstance(
+                instance_id=instance_id,
+                shard_assignments=shard_assignments,
             )
 
     return target_instances

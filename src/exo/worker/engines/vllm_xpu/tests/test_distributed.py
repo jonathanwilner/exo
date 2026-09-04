@@ -63,6 +63,8 @@ def test_build_vllm_command_contains_xpu_parallelism() -> None:
             gpu_memory_utilization=0.15,
             kv_cache_memory_bytes=67108864,
             enforce_eager=True,
+            dtype="bfloat16",
+            trust_remote_code=True,
         )
     )
 
@@ -70,7 +72,6 @@ def test_build_vllm_command_contains_xpu_parallelism() -> None:
         "vllm",
         "serve",
         "Qwen/Qwen3-1.7B",
-        "--device=xpu",
         "--distributed-executor-backend=ray",
         "--tensor-parallel-size=2",
         "--pipeline-parallel-size=1",
@@ -78,6 +79,8 @@ def test_build_vllm_command_contains_xpu_parallelism() -> None:
         "--gpu-memory-utilization=0.15",
         "--kv-cache-memory-bytes=67108864",
         "--enforce-eager",
+        "--dtype=bfloat16",
+        "--trust-remote-code",
     ]
 
 

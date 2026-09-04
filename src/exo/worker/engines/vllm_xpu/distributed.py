@@ -9,6 +9,7 @@ from pydantic import model_validator
 from exo.utils.pydantic_ext import FrozenModel
 
 RayNodeRole = Literal["head", "worker"]
+VllmDataType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
 @final
@@ -26,6 +27,8 @@ class VllmXpuDistributedConfig(FrozenModel):
     gpu_memory_utilization: float | None = None
     kv_cache_memory_bytes: int | None = None
     enforce_eager: bool = False
+    dtype: VllmDataType = "auto"
+    trust_remote_code: bool = False
 
     @property
     def world_size(self) -> int:
@@ -102,7 +105,6 @@ def build_vllm_serve_command(
         executable,
         "serve",
         config.model_id,
-        "--device=xpu",
         "--distributed-executor-backend=ray",
         f"--tensor-parallel-size={config.tensor_parallel_size}",
         f"--pipeline-parallel-size={config.pipeline_parallel_size}",
@@ -115,4 +117,8 @@ def build_vllm_serve_command(
         command.append(f"--kv-cache-memory-bytes={config.kv_cache_memory_bytes}")
     if config.enforce_eager:
         command.append("--enforce-eager")
+    if config.dtype != "auto":
+        command.append(f"--dtype={config.dtype}")
+    if config.trust_remote_code:
+        command.append("--trust-remote-code")
     return command
