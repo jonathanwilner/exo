@@ -1,3 +1,5 @@
+import asyncio
+import importlib
 import os
 import shutil
 import sys
@@ -5,7 +7,7 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from subprocess import CalledProcessError
-from typing import Self, cast
+from typing import Protocol, Self, cast
 
 import anyio
 from anyio import fail_after, open_process, to_thread
@@ -369,6 +371,27 @@ def _has_nvml_cuda() -> bool:
         return False
 
 
+class _XpuRuntime(Protocol):
+    def is_available(self) -> bool: ...
+
+
+class _TorchXpuModule(Protocol):
+    xpu: _XpuRuntime
+
+
+def _has_torch_xpu() -> bool:
+    """Return whether the installed PyTorch runtime can use an Intel XPU."""
+    try:
+        torch = cast(_TorchXpuModule, cast(object, importlib.import_module("torch")))
+    except ImportError:
+        return False
+
+    try:
+        return torch.xpu.is_available()
+    except (AttributeError, RuntimeError):
+        return False
+
+
 class NodeBackends(TaggedModel):
     backends: list[Backend]
 
@@ -377,8 +400,13 @@ class NodeBackends(TaggedModel):
         backends: list[Backend] = [Backend.MlxCpu]
         if IS_DARWIN:
             backends.append(Backend.MlxMetal)
-        if await to_thread.run_sync(_has_nvml_cuda):
+        has_nvml_cuda, has_torch_xpu = await asyncio.gather(
+            to_thread.run_sync(_has_nvml_cuda),
+            to_thread.run_sync(_has_torch_xpu),
+        )
+        if has_nvml_cuda:
             backends.append(Backend.MlxCuda)
+        if has_nvml_cuda or has_torch_xpu:
             backends.append(Backend.Vllm)
         return cls(backends=backends)
 
