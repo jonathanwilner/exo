@@ -12,6 +12,7 @@ const elements = {
   activeRequests: document.getElementById("active-requests"),
   prompt: document.getElementById("prompt"),
   maxTokens: document.getElementById("max-tokens"),
+  temperature: document.getElementById("temperature"),
   send: document.getElementById("send"),
   cancel: document.getElementById("cancel"),
   requestStatus: document.getElementById("request-status"),
@@ -22,6 +23,7 @@ const elements = {
 
 let activeRequestId = null;
 let streamController = null;
+let finishReason = null;
 
 function setIndicator(element, text, state) {
   element.textContent = text;
@@ -78,11 +80,18 @@ function handleEvent(eventName, data) {
     elements.usage.textContent =
       `Tokens: ${data.prompt_tokens} prompt + ${data.completion_tokens} completion = ${data.total_tokens} total`;
   } else if (eventName === "finish_reason") {
-    elements.requestStatus.textContent = `Finishing: ${data.reason}`;
+    finishReason = data.reason;
+    elements.requestStatus.textContent =
+      finishReason === "length"
+        ? "Maximum token limit reached; output may be incomplete."
+        : `Finishing: ${finishReason}`;
   } else if (eventName === "cancelled") {
     elements.requestStatus.textContent = "Request cancelled.";
   } else if (eventName === "finished") {
-    elements.requestStatus.textContent = "Request finished.";
+    elements.requestStatus.textContent =
+      finishReason === "length"
+        ? "Maximum token limit reached. Increase Max Tokens and retry."
+        : "Request finished.";
   } else if (eventName === "tool_call") {
     elements.requestStatus.textContent = data.message;
   } else if (eventName === "error") {
@@ -126,6 +135,7 @@ function setGenerating(generating) {
   elements.cancel.disabled = !generating;
   elements.prompt.disabled = generating;
   elements.maxTokens.disabled = generating;
+  elements.temperature.disabled = generating;
 }
 
 async function sendPrompt() {
@@ -139,6 +149,7 @@ async function sendPrompt() {
   elements.reasoning.textContent = "";
   elements.usage.textContent = "";
   elements.requestStatus.textContent = "Submitting request.";
+  finishReason = null;
   streamController = new AbortController();
   try {
     const response = await fetch("/api/chat", {
@@ -147,6 +158,7 @@ async function sendPrompt() {
       body: JSON.stringify({
         prompt,
         max_tokens: Number(elements.maxTokens.value),
+        temperature: Number(elements.temperature.value),
       }),
       signal: streamController.signal,
     });

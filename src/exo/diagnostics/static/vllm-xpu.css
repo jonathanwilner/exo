@@ -124,7 +124,7 @@ textarea {
 
 .controls {
   display: grid;
-  grid-template-columns: auto 100px 1fr auto auto;
+  grid-template-columns: auto 100px auto 100px 1fr auto auto;
   align-items: center;
   gap: 10px;
 }

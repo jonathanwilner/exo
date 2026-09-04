@@ -420,6 +420,9 @@ def test_security_headers_and_static_client_avoid_active_html_and_storage() -> N
     assert "innerHTML" not in javascript.text
     assert "localStorage" not in javascript.text
     assert "sessionStorage" not in javascript.text
+    assert 'id="temperature"' in response.text
+    assert "temperature: Number(elements.temperature.value)" in javascript.text
+    assert "Maximum token limit reached" in javascript.text
 
 
 def test_cancel_endpoint_reports_unknown_and_terminal_requests() -> None:
