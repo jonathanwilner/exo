@@ -1,0 +1,199 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #090b0d;
+  color: #e8ebed;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(145deg, #090b0d 0%, #10161b 100%);
+}
+
+main {
+  width: min(960px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 32px;
+}
+
+.eyebrow,
+label,
+dt,
+.status-grid span {
+  color: #ffd447;
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+}
+
+h1 {
+  margin: 8px 0;
+  font: 600 clamp(1.7rem, 4vw, 2.7rem) system-ui, sans-serif;
+}
+
+.summary,
+footer {
+  color: #9ca7ae;
+  line-height: 1.6;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 30px 0 12px;
+}
+
+.status-grid article,
+.details,
+.console {
+  border: 1px solid #2b353d;
+  border-radius: 8px;
+  background: rgb(18 23 28 / 92%);
+}
+
+.status-grid article {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+
+[data-state="ready"] {
+  color: #68db9c;
+}
+
+[data-state="failed"] {
+  color: #ff7e7e;
+}
+
+[data-state="pending"] {
+  color: #9ca7ae;
+}
+
+.details {
+  padding: 8px 16px;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+  margin: 0;
+}
+
+dl div {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #202930;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.console {
+  margin-top: 12px;
+  padding: 20px;
+}
+
+textarea,
+input,
+pre {
+  width: 100%;
+  border: 1px solid #384650;
+  border-radius: 6px;
+  background: #080b0d;
+  color: #f1f3f4;
+  font: inherit;
+}
+
+textarea {
+  display: block;
+  margin: 8px 0 12px;
+  padding: 12px;
+  resize: vertical;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: auto 100px 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+input {
+  padding: 9px;
+}
+
+button {
+  border: 1px solid #ffd447;
+  border-radius: 6px;
+  padding: 10px 18px;
+  background: #ffd447;
+  color: #111;
+  font: 700 0.8rem inherit;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+button#cancel {
+  background: transparent;
+  color: #ffd447;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+#request-status,
+#usage {
+  min-height: 1.4em;
+  color: #9ca7ae;
+}
+
+pre {
+  min-height: 180px;
+  margin: 8px 0 12px;
+  padding: 14px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+details pre {
+  min-height: 80px;
+  color: #abb5ba;
+}
+
+footer {
+  margin-top: 18px;
+  font-size: 0.78rem;
+}
+
+@media (max-width: 680px) {
+  main {
+    padding-top: 24px;
+  }
+
+  .status-grid,
+  dl {
+    grid-template-columns: 1fr;
+  }
+
+  .controls {
+    grid-template-columns: 1fr 100px;
+  }
+
+  .controls button {
+    grid-column: span 1;
+  }
+}

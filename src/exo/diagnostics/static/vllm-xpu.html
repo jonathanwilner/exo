@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Intel vLLM Engine Contract Console</title>
+    <link rel="stylesheet" href="/vllm-xpu.css" />
+    <script src="/vllm-xpu.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">EXO DIAGNOSTIC</p>
+        <h1>Intel vLLM Engine Contract Console</h1>
+        <p class="summary">
+          Every request uses the Exo <code>Engine</code> contract and the real
+          <code>VllmSidecarEngine</code>. This console makes no performance claim.
+        </p>
+      </header>
+
+      <section class="status-grid" aria-label="Runtime status">
+        <article>
+          <span>APPLICATION</span>
+          <strong id="application-status" data-state="pending">CHECKING</strong>
+        </article>
+        <article>
+          <span>vLLM SIDECAR</span>
+          <strong id="sidecar-status" data-state="pending">CHECKING</strong>
+        </article>
+        <article>
+          <span>INTEL XPU</span>
+          <strong id="xpu-status" data-state="pending">CHECKING</strong>
+        </article>
+      </section>
+
+      <section class="details" aria-label="Runtime details">
+        <dl>
+          <div><dt>Contract</dt><dd id="contract">Engine</dd></div>
+          <div><dt>Implementation</dt><dd id="implementation">VllmSidecarEngine</dd></div>
+          <div><dt>Model</dt><dd id="model">Loading</dd></div>
+          <div><dt>Sidecar</dt><dd id="sidecar-endpoint">Loading</dd></div>
+          <div><dt>XPU devices</dt><dd id="xpu-devices">Loading</dd></div>
+          <div><dt>Active requests</dt><dd id="active-requests">0</dd></div>
+        </dl>
+      </section>
+
+      <section class="console" aria-label="Generation console">
+        <label for="prompt">PROMPT</label>
+        <textarea
+          id="prompt"
+          maxlength="32768"
+          rows="7"
+          spellcheck="false"
+          placeholder="Enter a plain-text prompt"
+        ></textarea>
+        <div class="controls">
+          <label for="max-tokens">MAX TOKENS</label>
+          <input id="max-tokens" type="number" min="1" max="1024" value="256" />
+          <button id="send" type="button">SEND</button>
+          <button id="cancel" type="button" disabled>CANCEL</button>
+        </div>
+        <p id="request-status" role="status">Ready for a prompt.</p>
+        <label for="output">STREAMED OUTPUT</label>
+        <pre id="output" aria-live="polite"></pre>
+        <details>
+          <summary>Reasoning channel</summary>
+          <pre id="reasoning"></pre>
+        </details>
+        <p id="usage"></p>
+      </section>
+
+      <footer>
+        Prompts and responses remain in page memory. The console does not use
+        browser storage, render Markdown, execute tool calls, or launch models.
+      </footer>
+    </main>
+  </body>
+</html>
