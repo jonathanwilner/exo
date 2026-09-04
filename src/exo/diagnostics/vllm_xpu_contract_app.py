@@ -82,7 +82,7 @@ type BrokerResult = SidecarResult | BrokerFailure
 @final
 class ChatRequest(FrozenModel):
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARACTERS)
-    max_tokens: int = Field(default=256, ge=1, le=MAX_OUTPUT_TOKENS)
+    max_tokens: int = Field(default=MAX_OUTPUT_TOKENS, ge=1, le=MAX_OUTPUT_TOKENS)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     @field_validator("prompt")
