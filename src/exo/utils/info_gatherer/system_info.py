@@ -1,12 +1,20 @@
 import platform
 import socket
 import sys
+from collections.abc import Callable, Iterable
+from pathlib import Path
 from subprocess import CalledProcessError
 
 import psutil
 from anyio import run_process
 
 from exo.shared.types.profiling import InterfaceType, NetworkInterfaceInfo
+
+type PathResolver = Callable[[Path], Path]
+
+
+def _resolve_existing_path(path: Path) -> Path:
+    return path.resolve(strict=True)
 
 
 def get_os_version() -> str:
@@ -56,20 +64,12 @@ async def get_friendly_name() -> str:
     return process.stdout.decode("utf-8", errors="replace").strip() or hostname
 
 
-async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
-    """Parse networksetup -listallhardwareports to get interface types."""
-    if sys.platform != "darwin":
-        return {}
-
-    try:
-        result = await run_process(["networksetup", "-listallhardwareports"])
-    except CalledProcessError:
-        return {}
-
+def _parse_networksetup_interface_types(output: str) -> dict[str, InterfaceType]:
+    """Parse ``networksetup -listallhardwareports`` output."""
     types: dict[str, InterfaceType] = {}
     current_type: InterfaceType = "unknown"
 
-    for line in result.stdout.decode().splitlines():
+    for line in output.splitlines():
         if line.startswith("Hardware Port:"):
             port_name = line.split(":", 1)[1].strip()
             if "Wi-Fi" in port_name:
@@ -90,17 +90,147 @@ async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
     return types
 
 
+async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
+    """Get macOS interface types from ``networksetup``."""
+    if sys.platform != "darwin":
+        return {}
+
+    try:
+        result = await run_process(["networksetup", "-listallhardwareports"])
+    except CalledProcessError:
+        return {}
+
+    return _parse_networksetup_interface_types(result.stdout.decode())
+
+
+def _try_resolve(path: Path, resolve_path: PathResolver) -> Path | None:
+    try:
+        return resolve_path(path)
+    except (OSError, RuntimeError):
+        # Missing and cyclic sysfs links are not evidence of a device type.
+        return None
+
+
+def _is_thunderbolt_driver_path(path: Path) -> bool:
+    return path.name.replace("-", "_") == "thunderbolt_net"
+
+
+def _is_thunderbolt_bus_path(path: Path) -> bool:
+    return len(path.parts) >= 2 and path.parts[-2:] == ("bus", "thunderbolt")
+
+
+def _has_thunderbolt_bus_ancestor(
+    device_path: Path,
+    *,
+    sysfs_root: Path,
+    resolve_path: PathResolver,
+) -> bool:
+    resolved_device_path = _try_resolve(device_path, resolve_path)
+    resolved_sysfs_root = _try_resolve(sysfs_root, resolve_path)
+    if resolved_device_path is None or resolved_sysfs_root is None:
+        return False
+
+    try:
+        relative_device_path = resolved_device_path.relative_to(resolved_sysfs_root)
+    except ValueError:
+        return False
+
+    current_path = resolved_sysfs_root / relative_device_path
+    while current_path != resolved_sysfs_root:
+        subsystem_path = _try_resolve(current_path / "subsystem", resolve_path)
+        if subsystem_path is not None and _is_thunderbolt_bus_path(subsystem_path):
+            return True
+        current_path = current_path.parent
+
+    return False
+
+
+def _classify_linux_interface(
+    interface_name: str,
+    *,
+    sysfs_root: Path = Path("/sys"),
+    resolve_path: PathResolver = _resolve_existing_path,
+) -> InterfaceType:
+    """Classify a Linux interface using kernel-exported sysfs evidence.
+
+    Interface names are intentionally not evidence. This prevents an unrelated
+    interface named ``thunderbolt0`` from receiving Thunderbolt placement
+    priority.
+    """
+    if Path(interface_name).name != interface_name or interface_name in {".", ".."}:
+        return "unknown"
+
+    device_path = sysfs_root / "class" / "net" / interface_name / "device"
+    for driver_path in (
+        device_path / "driver",
+        device_path / "driver" / "module",
+    ):
+        resolved_driver_path = _try_resolve(driver_path, resolve_path)
+        if resolved_driver_path is not None and _is_thunderbolt_driver_path(
+            resolved_driver_path
+        ):
+            return "thunderbolt"
+
+    if _has_thunderbolt_bus_ancestor(
+        device_path,
+        sysfs_root=sysfs_root,
+        resolve_path=resolve_path,
+    ):
+        return "thunderbolt"
+
+    return "unknown"
+
+
+def _get_interface_types_from_linux_sysfs(
+    interface_names: Iterable[str],
+    *,
+    sysfs_root: Path = Path("/sys"),
+    resolve_path: PathResolver = _resolve_existing_path,
+) -> dict[str, InterfaceType]:
+    """Classify Linux network interfaces from an injectable sysfs tree."""
+    return {
+        interface_name: _classify_linux_interface(
+            interface_name,
+            sysfs_root=sysfs_root,
+            resolve_path=resolve_path,
+        )
+        for interface_name in interface_names
+    }
+
+
+async def _get_interface_types(
+    interface_names: Iterable[str],
+    *,
+    sysfs_root: Path = Path("/sys"),
+    resolve_path: PathResolver = _resolve_existing_path,
+) -> dict[str, InterfaceType]:
+    match sys.platform:
+        case "darwin":
+            return await _get_interface_types_from_networksetup()
+        case "linux":
+            return _get_interface_types_from_linux_sysfs(
+                interface_names,
+                sysfs_root=sysfs_root,
+                resolve_path=resolve_path,
+            )
+        case _:
+            return {}
+
+
 async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
     """
-    Retrieves detailed network interface information on macOS.
-    Parses output from 'networksetup -listallhardwareports' and 'ifconfig'
-    to determine interface names, IP addresses, and types (ethernet, wifi, vpn, other).
+    Retrieves detailed network interface information.
+
+    macOS types come from ``networksetup``. Linux Thunderbolt interfaces are
+    identified from sysfs driver and bus evidence. Other Linux interface types
+    remain unknown.
     Returns a list of NetworkInterfaceInfo objects.
     """
     interfaces_info: list[NetworkInterfaceInfo] = []
-    interface_types = await _get_interface_types_from_networksetup()
+    network_addresses = psutil.net_if_addrs()
+    interface_types = await _get_interface_types(network_addresses)
 
-    for iface, services in psutil.net_if_addrs().items():
+    for iface, services in network_addresses.items():
         for service in services:
             match service.family:
                 case socket.AF_INET | socket.AF_INET6:
