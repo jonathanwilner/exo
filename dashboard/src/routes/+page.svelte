@@ -72,6 +72,7 @@
   import { addToast, dismissByMessage } from "$lib/stores/toast.svelte";
   import HeaderNav from "$lib/components/HeaderNav.svelte";
   import DeviceIcon from "$lib/components/DeviceIcon.svelte";
+  import VllmDemoPanel from "$lib/components/VllmDemoPanel.svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { tweened } from "svelte/motion";
   import { cubicInOut, cubicOut } from "svelte/easing";
@@ -5045,28 +5046,32 @@
             {/if}
           </div>
 
-          <!-- Chat Input - Below topology, never overlaps -->
+          <!-- Demo or chat input below topology, never overlaps -->
           <div class="px-4 pt-4 pb-6 flex-shrink-0">
-            <div class="max-w-3xl mx-auto">
-              {#if instanceCount === 0}
-                <div class="text-center mb-4">
-                  <p class="text-sm text-white/50 font-sans">
-                    Select a model to get started.
-                  </p>
-                </div>
-              {/if}
-              <ChatForm
-                placeholder={instanceCount === 0
-                  ? "Choose a model to start chatting"
-                  : "Ask anything"}
-                showHelperText={false}
-                showModelSelector={true}
-                modelTasks={modelTasks()}
-                modelCapabilities={modelCapabilities()}
-                onOpenModelPicker={openChatModelPicker}
-                onAutoSend={handleChatSend}
-              />
-            </div>
+            {#if vllmContractDemo}
+              <VllmDemoPanel />
+            {:else}
+              <div class="max-w-3xl mx-auto">
+                {#if instanceCount === 0}
+                  <div class="text-center mb-4">
+                    <p class="text-sm text-white/50 font-sans">
+                      Select a model to get started.
+                    </p>
+                  </div>
+                {/if}
+                <ChatForm
+                  placeholder={instanceCount === 0
+                    ? "Choose a model to start chatting"
+                    : "Ask anything"}
+                  showHelperText={false}
+                  showModelSelector={true}
+                  modelTasks={modelTasks()}
+                  modelCapabilities={modelCapabilities()}
+                  onOpenModelPicker={openChatModelPicker}
+                  onAutoSend={handleChatSend}
+                />
+              </div>
+            {/if}
           </div>
         </div>
 
