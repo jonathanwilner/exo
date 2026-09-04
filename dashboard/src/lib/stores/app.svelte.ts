@@ -1387,6 +1387,13 @@ class AppStore {
   async fetchPlacementPreviews(modelId: string, showLoading = true) {
     if (!modelId) return;
 
+    if (this.featureFlags["vllmContractDemo"] === true) {
+      this.selectedPreviewModelId = modelId;
+      this.placementPreviews = [];
+      this.isLoadingPreviews = false;
+      return;
+    }
+
     if (showLoading) {
       this.isLoadingPreviews = true;
     }

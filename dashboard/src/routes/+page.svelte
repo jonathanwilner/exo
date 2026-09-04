@@ -65,6 +65,7 @@
     nodeThunderboltBridge,
     nodeIdentities,
     isConnected,
+    featureFlags,
     type DownloadProgress,
     type PlacementPreview,
   } from "$lib/stores/app.svelte";
@@ -97,6 +98,15 @@
   const tbIdentifiers = $derived(nodeThunderbolt());
   const rdmaCtlData = $derived(nodeRdmaCtl());
   const nodeFilter = $derived(previewNodeFilter());
+  const vllmContractDemo = $derived(
+    featureFlags()["vllmContractDemo"] === true,
+  );
+
+  function openVllmContractConsole(): boolean {
+    if (!vllmContractDemo) return false;
+    window.location.assign("/contract");
+    return true;
+  }
 
   // Aggregate active download progress across all instances for header indicator
   const activeDownloadSummary = $derived.by(() => {
@@ -692,6 +702,7 @@
   let onboardingError = $state<string | null>(null);
 
   async function onboardingLaunchModel(modelId: string) {
+    if (openVllmContractConsole()) return;
     onboardingModelId = modelId;
     onboardingError = null;
     selectPreviewModel(modelId);
@@ -1424,6 +1435,7 @@
     specificPreview?: PlacementPreview | null,
   ) {
     if (!modelId || launchingModelId) return;
+    if (openVllmContractConsole()) return;
 
     launchingModelId = modelId;
 
@@ -2751,6 +2763,7 @@
     category: string,
     skipCreate = false,
   ) {
+    if (openVllmContractConsole()) return;
     userForcedIdle = false;
     pendingChatModelId = modelId;
     selectedChatCategory = category;
@@ -2839,6 +2852,7 @@
       preview?: string;
     }[],
   ) {
+    if (openVllmContractConsole()) return;
     // Clear forced-idle so restore effect resumes normal operation
     userForcedIdle = false;
 
