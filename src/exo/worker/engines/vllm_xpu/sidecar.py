@@ -12,7 +12,7 @@ from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol, final
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, final
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,7 +29,6 @@ from exo.download.download_utils import build_model_path
 from exo.shared.constants import EXO_MAX_CONCURRENT_REQUESTS
 from exo.shared.models.model_cards import ModelId
 from exo.shared.types.chunks import Chunk, ErrorChunk, TokenChunk, ToolCallChunk
-from exo.shared.types.events import Event
 from exo.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     GenerationTask,
@@ -53,6 +52,9 @@ from exo.worker.engines.vllm_xpu.distributed import (
     build_vllm_environment,
     build_vllm_serve_command,
 )
+
+if TYPE_CHECKING:
+    from exo.shared.types.events import Event
 
 SidecarMode = Literal["managed", "external"]
 TokenFinishReason = Literal["stop", "length", "content_filter"]
