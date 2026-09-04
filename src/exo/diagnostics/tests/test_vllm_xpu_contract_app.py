@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Protocol, cast, override
 
@@ -24,8 +25,11 @@ from exo.diagnostics.vllm_xpu_contract_app import (
     EngineBroker,
     IntelXpuSysfsDevice,
     SidecarHealthStatus,
+    SimulationNodeStatus,
+    ThunderboltSimulationStatus,
     XpuRuntimeStatus,
     create_app,
+    dashboard_directory_from_environment,
     evaluate_real_xpu_hardware_gate,
     external_settings_from_environment,
     gather_intel_xpu_sysfs_devices,
@@ -133,6 +137,30 @@ def healthy_sidecar(
 ) -> SidecarHealthStatus:
     del settings, timeout_seconds
     return SidecarHealthStatus(ready=True)
+
+
+def active_simulation_status() -> ThunderboltSimulationStatus:
+    return ThunderboltSimulationStatus(
+        observed_at=datetime(2026, 9, 4, 22, tzinfo=timezone.utc),
+        active=True,
+        link_up=True,
+        nodes=(
+            SimulationNodeStatus(
+                namespace="exo-tb-node-a",
+                address="192.168.253.1/30",
+                interface_name="thunderbolt0",
+                present=True,
+                link_up=True,
+            ),
+            SimulationNodeStatus(
+                namespace="exo-tb-node-b",
+                address="192.168.253.2/30",
+                interface_name="thunderbolt0",
+                present=True,
+                link_up=True,
+            ),
+        ),
+    )
 
 
 @dataclass
@@ -426,6 +454,70 @@ def test_security_headers_and_static_client_avoid_active_html_and_storage() -> N
     assert 'id="temperature"' in response.text
     assert "temperature: Number(elements.temperature.value)" in javascript.text
     assert "Maximum token limit reached" in javascript.text
+
+
+def test_dashboard_mode_serves_real_dashboard_and_two_node_simulation(
+    tmp_path: Path,
+) -> None:
+    dashboard_directory = tmp_path / "dashboard"
+    dashboard_directory.mkdir()
+    (dashboard_directory / "index.html").write_text(
+        "<!doctype html><title>dashboard-marker</title>",
+        encoding="utf-8",
+    )
+    runtime = make_real_runtime(EchoTransport())
+    app = create_app(
+        runtime_factory=lambda: runtime,
+        health_probe=healthy_sidecar,
+        xpu_status_provider=ready_xpu_status,
+        simulation_status_provider=active_simulation_status,
+        dashboard_directory=dashboard_directory,
+    )
+
+    with TestClient(app) as client:
+        dashboard = client.get("/")
+        contract = client.get("/contract")
+        state_response = client.get("/state")
+        status_response = client.get("/api/simulation/status")
+        feature_flags_response = client.get("/v1/feature-flags")
+
+    assert "dashboard-marker" in dashboard.text
+    assert "Intel vLLM Engine Contract Console" in contract.text
+    assert '"nodes":["slazenger-panther-lake","thunderbolt-peer-simulated"]' in (
+        state_response.text
+    )
+    assert '"ip_address":"192.168.253.2"' in state_response.text
+    assert '"interfaceType":"thunderbolt"' in state_response.text
+    assert '"active":true' in status_response.text
+    assert '"link_up":true' in status_response.text
+    assert '"vllmContractDemo":true' in feature_flags_response.text
+    assert "'unsafe-inline'" in dashboard.headers["content-security-policy"]
+    assert "img-src 'none'" in contract.headers["content-security-policy"]
+
+
+def test_unavailable_simulation_keeps_virtual_peer_out_of_cluster() -> None:
+    runtime = make_real_runtime(EchoTransport())
+    app = create_app(
+        runtime_factory=lambda: runtime,
+        health_probe=healthy_sidecar,
+        xpu_status_provider=ready_xpu_status,
+        simulation_status_provider=lambda: ThunderboltSimulationStatus(
+            detail="FileNotFoundError"
+        ),
+    )
+
+    with TestClient(app) as client:
+        state_response = client.get("/state")
+
+    assert '"nodes":["slazenger-panther-lake"]' in state_response.text
+    assert '"connections":{}' in state_response.text
+
+
+def test_dashboard_directory_requires_built_index(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="built dashboard index.html"):
+        dashboard_directory_from_environment(
+            {"EXO_VLLM_DEMO_DASHBOARD_DIR": str(tmp_path)}
+        )
 
 
 def test_cancel_endpoint_reports_unknown_and_terminal_requests() -> None:

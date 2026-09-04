@@ -9,6 +9,7 @@ const elements = {
   model: document.getElementById("model"),
   sidecarEndpoint: document.getElementById("sidecar-endpoint"),
   xpuDevices: document.getElementById("xpu-devices"),
+  simulationStatus: document.getElementById("simulation-status"),
   activeRequests: document.getElementById("active-requests"),
   prompt: document.getElementById("prompt"),
   maxTokens: document.getElementById("max-tokens"),
@@ -60,6 +61,10 @@ async function refreshStatus() {
     elements.xpuDevices.textContent = names.length
       ? names.join(", ")
       : `${sysfsCount} Intel DRM device(s); PyTorch names unavailable`;
+    const simulation = status.simulation;
+    elements.simulationStatus.textContent = simulation?.active
+      ? `2 network namespaces; thunderbolt0 link ${simulation.link_up ? "up" : "down"}`
+      : "Unavailable";
     elements.activeRequests.textContent = String(status.active_requests);
   } catch (error) {
     setIndicator(elements.applicationStatus, "UNAVAILABLE", "failed");

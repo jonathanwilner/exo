@@ -4,6 +4,7 @@ import json
 from argparse import ArgumentTypeError
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -256,10 +257,47 @@ def test_stop_deletes_only_exact_owned_namespaces(tmp_path: Path) -> None:
     assert not (tmp_path / "state.json").exists()
 
 
+def test_export_status_writes_sanitized_two_node_snapshot(tmp_path: Path) -> None:
+    write_state(tmp_path)
+    runner = RecordingRunner(
+        iter(
+            [
+                f"{NODE_A_NAMESPACE}\n{NODE_B_NAMESPACE}\n",
+                ownership_json("a"),
+                json.dumps([{"operstate": "UP"}]),
+                ownership_json("b"),
+                json.dumps([{"operstate": "UP"}]),
+            ]
+        )
+    )
+    target = harness(tmp_path, runner)
+    output_path = tmp_path / "public" / "status.json"
+
+    target.export_status(output_path, dry_run=False)
+
+    snapshot = cast(
+        dict[str, object],
+        cast(object, json.loads(output_path.read_text(encoding="utf-8"))),
+    )
+    nodes = cast(list[dict[str, object]], snapshot["nodes"])
+    assert snapshot["active"] is True
+    assert snapshot["link_up"] is True
+    assert [node["namespace"] for node in nodes] == [
+        NODE_A_NAMESPACE,
+        NODE_B_NAMESPACE,
+    ]
+    assert all(node["interface_name"] == "thunderbolt0" for node in nodes)
+    assert TEST_TOKEN not in output_path.read_text(encoding="utf-8")
+    assert output_path.stat().st_mode & 0o777 == 0o644
+
+
 def test_tampered_state_names_are_rejected_before_commands(tmp_path: Path) -> None:
     write_state(tmp_path)
     state_path = tmp_path / "state.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state = cast(
+        dict[str, object],
+        cast(object, json.loads(state_path.read_text(encoding="utf-8"))),
+    )
     state["node_a_namespace"] = "foreign"
     state_path.write_text(json.dumps(state), encoding="utf-8")
     runner = RecordingRunner()

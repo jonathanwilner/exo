@@ -14,9 +14,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -28,6 +30,7 @@ THUNDERBOLT_INTERFACE = "thunderbolt0"
 NODE_A_ADDRESS = "192.168.253.1/30"
 NODE_B_ADDRESS = "192.168.253.2/30"
 STATE_VERSION = 1
+STATUS_VERSION = 1
 ALIAS_PREFIX = "exo-thunderbolt-netns"
 
 LATENCY_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:us|ms|s)$")
@@ -88,6 +91,27 @@ class NetemSettings:
 
 class HarnessError(RuntimeError):
     """A safe, user-actionable harness failure."""
+
+
+def _json_object_list(value: str) -> list[dict[str, object]]:
+    decoded = cast(object, json.loads(value or "[]"))
+    if not isinstance(decoded, list):
+        raise HarnessError("expected a JSON array from ip")
+    result: list[dict[str, object]] = []
+    for item in cast(list[object], decoded):
+        if not isinstance(item, dict):
+            raise HarnessError("expected JSON objects from ip")
+        result.append(cast(dict[str, object], item))
+    return result
+
+
+def _required_state_value(
+    values: Mapping[str, object], name: str, value_type: type[int] | type[str]
+) -> int | str:
+    value = values.get(name)
+    if not isinstance(value, value_type):
+        raise TypeError(f"invalid state field: {name}")
+    return value
 
 
 def default_state_path() -> Path:
@@ -242,6 +266,73 @@ class ThunderboltNetworkHarness:
                 "qdisc": json.loads(qdisc_result.stdout or "[]"),
             }
         self._output(json.dumps(report, indent=2, sort_keys=True))
+
+    def export_status(self, output_path: Path, *, dry_run: bool) -> None:
+        """Publish a sanitized status snapshot for an unprivileged demo app."""
+
+        self._require_root_or_dry_run(dry_run)
+        if dry_run:
+            self._output(f"write sanitized simulation status to {output_path}")
+            return
+
+        state = self._read_and_validate_state()
+        live_namespaces = self._namespace_names()
+        nodes: list[dict[str, object]] = []
+        link_up = True
+        for namespace, address in (
+            (state.node_a_namespace, state.node_a_address),
+            (state.node_b_namespace, state.node_b_address),
+        ):
+            if namespace not in live_namespaces:
+                link_up = False
+                nodes.append(
+                    {
+                        "namespace": namespace,
+                        "address": address,
+                        "interface_name": state.interface_name,
+                        "present": False,
+                        "link_up": False,
+                    }
+                )
+                continue
+
+            self._verify_interface_ownership(state, namespace)
+            result = self._runner(
+                (
+                    "ip",
+                    "-n",
+                    namespace,
+                    "-details",
+                    "-json",
+                    "link",
+                    "show",
+                    "dev",
+                    state.interface_name,
+                )
+            )
+            links = _json_object_list(result.stdout)
+            interface_up = len(links) == 1 and links[0].get("operstate") == "UP"
+            link_up = link_up and interface_up
+            nodes.append(
+                {
+                    "namespace": namespace,
+                    "address": address,
+                    "interface_name": state.interface_name,
+                    "present": True,
+                    "link_up": interface_up,
+                }
+            )
+
+        snapshot = {
+            "version": STATUS_VERSION,
+            "mode": "network-namespace",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "active": all(bool(node["present"]) for node in nodes),
+            "link_up": link_up,
+            "nodes": nodes,
+        }
+        self._write_public_snapshot(output_path, snapshot)
+        self._output(f"exported sanitized simulation status to {output_path}")
 
     def fail(self, *, dry_run: bool) -> None:
         """Simulate a cable failure by taking down both owned interfaces."""
@@ -465,22 +556,49 @@ class ThunderboltNetworkHarness:
                 state.interface_name,
             )
         )
-        links = json.loads(result.stdout or "[]")
-        if not isinstance(links, list) or len(links) != 1:
+        links = _json_object_list(result.stdout)
+        if len(links) != 1:
             raise HarnessError(
                 f"cannot verify owned interface in namespace {namespace}"
             )
         link = links[0]
         expected_alias = self._expected_alias(state, namespace)
-        if not isinstance(link, dict) or link.get("ifalias") != expected_alias:
+        if link.get("ifalias") != expected_alias:
             raise HarnessError(
                 f"ownership marker mismatch in {namespace}; refusing destructive action"
             )
 
     def _read_and_validate_state(self) -> HarnessState:
         try:
-            raw_state = json.loads(self._state_path.read_text(encoding="utf-8"))
-            state = HarnessState(**raw_state)
+            decoded_state = cast(
+                object,
+                json.loads(self._state_path.read_text(encoding="utf-8")),
+            )
+            if not isinstance(decoded_state, dict):
+                raise TypeError("state must be a JSON object")
+            raw_state = cast(dict[str, object], decoded_state)
+            state = HarnessState(
+                version=cast(int, _required_state_value(raw_state, "version", int)),
+                owner_uid=cast(int, _required_state_value(raw_state, "owner_uid", int)),
+                ownership_token=cast(
+                    str, _required_state_value(raw_state, "ownership_token", str)
+                ),
+                node_a_namespace=cast(
+                    str, _required_state_value(raw_state, "node_a_namespace", str)
+                ),
+                node_b_namespace=cast(
+                    str, _required_state_value(raw_state, "node_b_namespace", str)
+                ),
+                interface_name=cast(
+                    str, _required_state_value(raw_state, "interface_name", str)
+                ),
+                node_a_address=cast(
+                    str, _required_state_value(raw_state, "node_a_address", str)
+                ),
+                node_b_address=cast(
+                    str, _required_state_value(raw_state, "node_b_address", str)
+                ),
+            )
         except (FileNotFoundError, json.JSONDecodeError, TypeError) as error:
             raise HarnessError(
                 f"cannot read valid state file: {self._state_path}"
@@ -513,6 +631,25 @@ class ThunderboltNetworkHarness:
         with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
             json.dump(asdict(state), state_file, indent=2, sort_keys=True)
             state_file.write("\n")
+
+    def _write_public_snapshot(
+        self, output_path: Path, snapshot: Mapping[str, object]
+    ) -> None:
+        output_path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output_file:
+                os.fchmod(output_file.fileno(), 0o644)
+                json.dump(snapshot, output_file, indent=2, sort_keys=True)
+                output_file.write("\n")
+            os.replace(temporary_path, output_path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
 
     def _expected_alias(self, state: HarnessState, namespace: str) -> str:
         side = "a" if namespace == NODE_A_NAMESPACE else "b"
@@ -558,7 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "action",
-        choices=("start", "status", "fail", "restore", "stop"),
+        choices=("start", "status", "export-status", "fail", "restore", "stop"),
     )
     parser.add_argument(
         "--dry-run",
@@ -574,30 +711,46 @@ def build_parser() -> argparse.ArgumentParser:
         default=default_state_path(),
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--output-path",
+        type=Path,
+        help="status snapshot destination for export-status",
+    )
     return parser
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
     parsed = build_parser().parse_args(arguments)
-    harness = ThunderboltNetworkHarness(state_path=parsed.state_path)
+    action = cast(str, parsed.action)
+    dry_run = cast(bool, parsed.dry_run)
+    state_path = cast(Path, parsed.state_path)
+    output_path = cast(Path | None, parsed.output_path)
+    latency = cast(str | None, parsed.latency)
+    loss = cast(str | None, parsed.loss)
+    rate = cast(str | None, parsed.rate)
+    harness = ThunderboltNetworkHarness(state_path=state_path)
     settings = NetemSettings(
-        latency=parsed.latency,
-        loss=parsed.loss,
-        rate=parsed.rate,
+        latency=latency,
+        loss=loss,
+        rate=rate,
     )
     try:
-        if parsed.action != "start" and settings.arguments():
+        if action != "start" and settings.arguments():
             raise HarnessError("traffic impairment options are valid only with start")
-        if parsed.action == "start":
-            harness.start(settings, dry_run=parsed.dry_run)
-        elif parsed.action == "status":
-            harness.status(dry_run=parsed.dry_run)
-        elif parsed.action == "fail":
-            harness.fail(dry_run=parsed.dry_run)
-        elif parsed.action == "restore":
-            harness.restore(dry_run=parsed.dry_run)
+        if action == "start":
+            harness.start(settings, dry_run=dry_run)
+        elif action == "status":
+            harness.status(dry_run=dry_run)
+        elif action == "export-status":
+            if output_path is None:
+                raise HarnessError("export-status requires --output-path")
+            harness.export_status(output_path, dry_run=dry_run)
+        elif action == "fail":
+            harness.fail(dry_run=dry_run)
+        elif action == "restore":
+            harness.restore(dry_run=dry_run)
         else:
-            harness.stop(dry_run=parsed.dry_run)
+            harness.stop(dry_run=dry_run)
     except (HarnessError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

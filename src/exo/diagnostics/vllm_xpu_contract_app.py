@@ -12,6 +12,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol, cast, final
 from urllib.parse import urlsplit
@@ -20,6 +21,7 @@ import httpx
 from anyio import create_task_group, to_thread
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import Field, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
@@ -59,6 +61,9 @@ MAX_OUTPUT_TOKENS = 1_024
 SESSION_QUEUE_SIZE = 4_096
 MAX_TRACKED_SESSIONS = 256
 DEFAULT_HEALTH_TIMEOUT_SECONDS = 1.0
+DEFAULT_SIMULATION_STATUS_PATH = Path("/run/exo-thunderbolt-simulation/status.json")
+REAL_NODE_ID = "slazenger-panther-lake"
+SIMULATED_NODE_ID = "thunderbolt-peer-simulated"
 
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 SECURITY_HEADERS: Mapping[str, str] = {
@@ -67,6 +72,19 @@ SECURITY_HEADERS: Mapping[str, str] = {
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "connect-src 'self'; img-src 'none'; object-src 'none'; "
         "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    ),
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
+DASHBOARD_SECURITY_HEADERS: Mapping[str, str] = {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; connect-src 'self'; "
+        "img-src 'self' data: blob:; font-src 'self' data:; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+        "form-action 'self'"
     ),
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
@@ -134,8 +152,38 @@ class ContractStatus(FrozenModel):
     sidecar: SidecarHealthStatus
     xpu: XpuRuntimeStatus
     hardware_gate: HardwareGateStatus
+    simulation: ThunderboltSimulationStatus | None = None
     active_requests: int
     performance_claim: Literal["none"] = "none"
+
+
+@final
+class SimulationNodeStatus(FrozenModel):
+    namespace: str
+    address: str
+    interface_name: str
+    present: bool
+    link_up: bool
+
+
+@final
+class ThunderboltSimulationStatus(FrozenModel):
+    version: Literal[1] = 1
+    mode: Literal["network-namespace"] = "network-namespace"
+    observed_at: datetime | None = None
+    active: bool = False
+    link_up: bool = False
+    nodes: tuple[SimulationNodeStatus, ...] = ()
+    detail: str | None = None
+
+    @field_validator("nodes")
+    @classmethod
+    def require_zero_or_two_nodes(
+        cls, value: tuple[SimulationNodeStatus, ...]
+    ) -> tuple[SimulationNodeStatus, ...]:
+        if len(value) not in {0, 2}:
+            raise ValueError("simulation status must contain zero or two nodes")
+        return value
 
 
 @final
@@ -154,6 +202,158 @@ class _XpuApi(Protocol):
 class _TorchModule(Protocol):
     __version__: str
     xpu: _XpuApi
+
+
+type SimulationStatusProvider = Callable[[], ThunderboltSimulationStatus]
+
+
+def read_thunderbolt_simulation_status(
+    status_path: Path = DEFAULT_SIMULATION_STATUS_PATH,
+) -> ThunderboltSimulationStatus:
+    """Read the root-published, sanitized network namespace status."""
+
+    try:
+        return ThunderboltSimulationStatus.model_validate_json(
+            status_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as error:
+        return ThunderboltSimulationStatus(detail=type(error).__name__)
+
+
+def dashboard_directory_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> Path | None:
+    values = os.environ if environment is None else environment
+    configured = values.get("EXO_VLLM_DEMO_DASHBOARD_DIR", "").strip()
+    if not configured:
+        return None
+    dashboard_directory = Path(configured)
+    if not (dashboard_directory / "index.html").is_file():
+        raise ValueError(
+            "EXO_VLLM_DEMO_DASHBOARD_DIR must contain a built dashboard index.html"
+        )
+    return dashboard_directory
+
+
+def build_demo_cluster_state(
+    simulation: ThunderboltSimulationStatus,
+) -> dict[str, object]:
+    """Project the live namespace simulation into Exo's dashboard state schema."""
+
+    real_address = "192.168.253.1"
+    simulated_address = "192.168.253.2"
+    nodes = [REAL_NODE_ID]
+    identities: dict[str, object] = {
+        REAL_NODE_ID: {
+            "modelId": "Intel Panther Lake 12 Xe iGPU",
+            "chipId": "Intel Arc B390",
+            "friendlyName": "Slazenger (real XPU)",
+            "osVersion": "Linux",
+            "osBuildVersion": "simulated-cluster-demo",
+        }
+    }
+    node_memory: dict[str, object] = {
+        REAL_NODE_ID: {
+            "ramTotal": {"inBytes": 62_432_477_184},
+            "ramAvailable": {"inBytes": 20_000_000_000},
+            "swapTotal": {"inBytes": 0},
+            "swapAvailable": {"inBytes": 0},
+        }
+    }
+    node_system: dict[str, object] = {
+        REAL_NODE_ID: {"gpuUsage": 0.0, "temp": 0.0, "sysPower": 0.0}
+    }
+    node_network: dict[str, object] = {
+        REAL_NODE_ID: {
+            "interfaces": [
+                {
+                    "name": "thunderbolt0",
+                    "ipAddress": real_address,
+                    "interfaceType": "thunderbolt",
+                }
+            ]
+        }
+    }
+    connections: dict[str, object] = {}
+    if simulation.active:
+        nodes.append(SIMULATED_NODE_ID)
+        identities[SIMULATED_NODE_ID] = {
+            "modelId": "Virtual Linux node",
+            "chipId": "No accelerator (simulated)",
+            "friendlyName": "Thunderbolt Peer (simulated)",
+            "osVersion": "Linux",
+            "osBuildVersion": "network-namespace",
+        }
+        node_memory[SIMULATED_NODE_ID] = {
+            "ramTotal": {"inBytes": 0},
+            "ramAvailable": {"inBytes": 0},
+            "swapTotal": {"inBytes": 0},
+            "swapAvailable": {"inBytes": 0},
+        }
+        node_system[SIMULATED_NODE_ID] = {
+            "gpuUsage": 0.0,
+            "temp": 0.0,
+            "sysPower": 0.0,
+        }
+        node_network[SIMULATED_NODE_ID] = {
+            "interfaces": [
+                {
+                    "name": "thunderbolt0",
+                    "ipAddress": simulated_address,
+                    "interfaceType": "thunderbolt",
+                }
+            ]
+        }
+        if simulation.link_up:
+            connections = {
+                REAL_NODE_ID: {
+                    SIMULATED_NODE_ID: [
+                        {
+                            "sinkMultiaddr": {
+                                "address": f"/ip4/{simulated_address}/tcp/52415",
+                                "address_type": "ip4",
+                                "ip_address": simulated_address,
+                                "port": 52415,
+                            }
+                        }
+                    ]
+                },
+                SIMULATED_NODE_ID: {
+                    REAL_NODE_ID: [
+                        {
+                            "sinkMultiaddr": {
+                                "address": f"/ip4/{real_address}/tcp/52415",
+                                "address_type": "ip4",
+                                "ip_address": real_address,
+                                "port": 52415,
+                            }
+                        }
+                    ]
+                },
+            }
+
+    return {
+        "instances": {},
+        "runners": {},
+        "downloads": {},
+        "tasks": {},
+        "lastSeen": {},
+        "topology": {"nodes": nodes, "connections": connections},
+        "lastEventAppliedIdx": -1,
+        "nodeIdentities": identities,
+        "nodeMemory": node_memory,
+        "nodeDisk": {},
+        "nodeSystem": node_system,
+        "nodeNetwork": node_network,
+        "nodeThunderbolt": {},
+        "nodeThunderboltBridge": {},
+        "nodeRdmaCtl": {},
+        "nodeBackends": {REAL_NODE_ID: ["Vllm"], SIMULATED_NODE_ID: []},
+        "thunderboltBridgeCycles": [],
+        "instanceLinks": {},
+        "prefillServerPorts": {},
+        "customModelCards": {},
+    }
 
 
 def _read_optional_text(path: Path) -> str | None:
@@ -571,8 +771,27 @@ def create_app(
     runtime_factory: RuntimeFactory = build_external_runtime,
     health_probe: HealthProbe = probe_sidecar_health,
     xpu_status_provider: XpuStatusProvider = gather_xpu_runtime_status,
+    simulation_status_provider: SimulationStatusProvider | None = None,
+    dashboard_directory: Path | None = None,
 ) -> FastAPI:
     context: tuple[ContractRuntime, EngineBroker] | None = None
+    resolved_dashboard_directory = (
+        dashboard_directory
+        if dashboard_directory is not None
+        else dashboard_directory_from_environment()
+    )
+    if simulation_status_provider is None:
+        configured_status_path = Path(
+            os.environ.get(
+                "EXO_THUNDERBOLT_SIMULATION_STATUS_PATH",
+                str(DEFAULT_SIMULATION_STATUS_PATH),
+            )
+        )
+
+        def configured_simulation_status_provider() -> ThunderboltSimulationStatus:
+            return read_thunderbolt_simulation_status(configured_status_path)
+
+        simulation_status_provider = configured_simulation_status_provider
 
     def current_context() -> tuple[ContractRuntime, EngineBroker]:
         if context is None:
@@ -605,11 +824,17 @@ def create_app(
         request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         response = await call_next(request)
-        for name, value in SECURITY_HEADERS.items():
+        contract_path = (
+            request.url.path == "/contract"
+            or (request.url.path == "/" and resolved_dashboard_directory is None)
+            or request.url.path.startswith(("/api/", "/vllm-xpu"))
+        )
+        headers = SECURITY_HEADERS if contract_path else DASHBOARD_SECURITY_HEADERS
+        for name, value in headers.items():
             response.headers[name] = value
         return response
 
-    async def index() -> FileResponse:
+    async def contract_index() -> FileResponse:
         return FileResponse(STATIC_DIRECTORY / "vllm-xpu.html")
 
     async def javascript() -> FileResponse:
@@ -656,8 +881,44 @@ def create_app(
             sidecar=health,
             xpu=xpu,
             hardware_gate=hardware_gate,
+            simulation=simulation_status_provider(),
             active_requests=broker.active_request_count,
         )
+
+    async def simulation_status() -> ThunderboltSimulationStatus:
+        return simulation_status_provider()
+
+    async def dashboard_state() -> JSONResponse:
+        return JSONResponse(build_demo_cluster_state(simulation_status_provider()))
+
+    async def node_id() -> str:
+        return REAL_NODE_ID
+
+    async def onboarding() -> dict[str, bool]:
+        return {"completed": True}
+
+    async def models() -> dict[str, object]:
+        runtime, _ = current_context()
+        model_id = str(runtime.settings.model_id)
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": model_id,
+                    "name": "DeepSeek R1 Distill Qwen 1.5B on Intel XPU",
+                    "hugging_face_id": model_id,
+                    "tasks": ["TextGeneration"],
+                    "capabilities": ["text"],
+                    "family": "deepseek",
+                }
+            ],
+        }
+
+    async def feature_flags() -> dict[str, bool]:
+        return {
+            "vllmContractDemo": True,
+            "thunderboltSimulation": True,
+        }
 
     async def chat(payload: ChatRequest) -> StreamingResponse:
         runtime, broker = current_context()
@@ -737,7 +998,11 @@ def create_app(
                 )
 
     app.middleware("http")(add_security_headers)
-    app.add_api_route("/", index, methods=["GET"], include_in_schema=False)
+    if resolved_dashboard_directory is None:
+        app.add_api_route("/", contract_index, methods=["GET"], include_in_schema=False)
+    app.add_api_route(
+        "/contract", contract_index, methods=["GET"], include_in_schema=False
+    )
     app.add_api_route(
         "/vllm-xpu.js", javascript, methods=["GET"], include_in_schema=False
     )
@@ -752,6 +1017,17 @@ def create_app(
         methods=["GET"],
         response_model_by_alias=False,
     )
+    app.add_api_route(
+        "/api/simulation/status",
+        simulation_status,
+        methods=["GET"],
+        response_model_by_alias=False,
+    )
+    app.add_api_route("/state", dashboard_state, methods=["GET"])
+    app.add_api_route("/node_id", node_id, methods=["GET"])
+    app.add_api_route("/onboarding", onboarding, methods=["GET", "POST"])
+    app.add_api_route("/models", models, methods=["GET"])
+    app.add_api_route("/v1/feature-flags", feature_flags, methods=["GET"])
     app.add_api_route("/api/chat", chat, methods=["POST"], response_model=None)
     app.add_api_route(
         "/api/requests/{task_id}/cancel",
@@ -759,6 +1035,12 @@ def create_app(
         methods=["POST"],
         response_model=None,
     )
+    if resolved_dashboard_directory is not None:
+        app.mount(
+            "/",
+            StaticFiles(directory=resolved_dashboard_directory, html=True),
+            name="dashboard",
+        )
     return app
 
 

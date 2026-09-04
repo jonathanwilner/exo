@@ -302,6 +302,7 @@
       ip: string;
       ifaceLabel: string;
       missingIface: boolean;
+      interfaceType?: string;
     };
     type PairEntry = {
       a: string;
@@ -358,6 +359,7 @@
         ip,
         ifaceLabel,
         missingIface,
+        interfaceType: edge.interfaceType,
       });
       pairMap.set(key, entry);
     });
@@ -375,6 +377,41 @@
         .attr("x2", posB.x)
         .attr("y2", posB.y)
         .attr("class", "graph-link");
+
+      if (
+        entry.connections.some(
+          (connection) => connection.interfaceType === "thunderbolt",
+        )
+      ) {
+        const labelGroup = linksGroup
+          .append("g")
+          .attr("class", "thunderbolt-link-label")
+          .attr(
+            "transform",
+            `translate(${(posA.x + posB.x) / 2}, ${(posA.y + posB.y) / 2})`,
+          );
+        labelGroup
+          .append("rect")
+          .attr("x", -58)
+          .attr("y", -12)
+          .attr("width", 116)
+          .attr("height", 24)
+          .attr("rx", 12)
+          .attr("fill", "rgba(9,11,13,0.94)")
+          .attr("stroke", "rgba(255,212,71,0.75)")
+          .attr("stroke-width", 1);
+        labelGroup
+          .append("text")
+          .attr("x", 0)
+          .attr("y", 1)
+          .attr("text-anchor", "middle")
+          .attr("dominant-baseline", "middle")
+          .attr("fill", "#ffd447")
+          .attr("font-size", isMinimized ? 8 : 10)
+          .attr("font-family", "SF Mono, monospace")
+          .attr("letter-spacing", "0.08em")
+          .text("THUNDERBOLT SIM");
+      }
 
       // Calculate midpoint and direction for arrows
       const dx = posB.x - posA.x;

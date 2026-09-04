@@ -34,6 +34,7 @@ export interface NodeInfo {
   network_interfaces?: Array<{
     name?: string;
     addresses?: string[];
+    interfaceType?: string;
   }>;
   ip_to_interface?: Record<string, string>;
   macmon_info?: {
@@ -59,6 +60,7 @@ export interface TopologyEdge {
   sendBackInterface?: string;
   sourceRdmaIface?: string;
   sinkRdmaIface?: string;
+  interfaceType?: string;
 }
 
 export interface TopologyData {
@@ -106,6 +108,7 @@ interface RawSystemPerformanceProfile {
 
 interface RawNetworkInterfaceInfo {
   name?: string;
+  interfaceType?: string;
   ipAddress?: string;
   addresses?: Array<{ address?: string } | string>;
   ipv4?: string;
@@ -381,6 +384,7 @@ interface GranularNodeState {
 function transformNetworkInterface(iface: RawNetworkInterfaceInfo): {
   name?: string;
   addresses: string[];
+  interfaceType?: string;
 } {
   const addresses: string[] = [];
   if (iface.ipAddress && typeof iface.ipAddress === "string") {
@@ -409,6 +413,7 @@ function transformNetworkInterface(iface: RawNetworkInterfaceInfo): {
   return {
     name: iface.name,
     addresses: Array.from(new Set(addresses)),
+    interfaceType: iface.interfaceType,
   };
 }
 
@@ -497,12 +502,19 @@ function transformTopology(
           }
 
           if (nodes[source] && nodes[sink] && source !== sink) {
+            const cleanSendBackIp = sendBackIp?.split(":")[0];
+            const matchingInterface = Object.values(nodes)
+              .flatMap((node) => node.network_interfaces ?? [])
+              .find((networkInterface) =>
+                networkInterface.addresses?.includes(cleanSendBackIp ?? ""),
+              );
             edges.push({
               source,
               target: sink,
               sendBackIp,
               sourceRdmaIface,
               sinkRdmaIface,
+              interfaceType: matchingInterface?.interfaceType,
             });
           }
         }

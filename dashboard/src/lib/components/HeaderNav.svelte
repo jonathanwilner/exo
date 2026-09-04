@@ -1,8 +1,38 @@
 <script lang="ts">
   import { browser } from "$app/environment";
+  import { onDestroy, onMount } from "svelte";
   import { featureFlags } from "$lib/stores/app.svelte";
 
   const showAdvanced = $derived(featureFlags()["disaggregation"] === true);
+  const showVllmDemo = $derived(featureFlags()["vllmContractDemo"] === true);
+  let simulationActive = $state(false);
+  let simulationLinkUp = $state(false);
+  let simulationTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function refreshSimulationStatus(): Promise<void> {
+    if (!showVllmDemo) return;
+    try {
+      const response = await fetch("/api/simulation/status", {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const status = await response.json();
+      simulationActive = status.active === true;
+      simulationLinkUp = status.link_up === true;
+    } catch {
+      simulationActive = false;
+      simulationLinkUp = false;
+    }
+  }
+
+  onMount(() => {
+    refreshSimulationStatus();
+    simulationTimer = setInterval(refreshSimulationStatus, 2000);
+  });
+
+  onDestroy(() => {
+    if (simulationTimer !== null) clearInterval(simulationTimer);
+  });
 
   interface Props {
     showHome?: boolean;
@@ -165,6 +195,29 @@
     class="absolute right-4 md:right-6 top-1/2 -translate-y-1/2 flex items-center gap-2 md:gap-4"
     aria-label="Main navigation"
   >
+    {#if showVllmDemo}
+      <span
+        class="hidden lg:flex items-center gap-1.5 px-2 py-1 rounded border text-[10px] font-mono tracking-wide {simulationActive &&
+        simulationLinkUp
+          ? 'border-green-400/40 text-green-300 bg-green-400/10'
+          : 'border-red-400/40 text-red-300 bg-red-400/10'}"
+        title="Two Linux network namespaces connected by a simulated thunderbolt0 link"
+      >
+        <span
+          class="w-1.5 h-1.5 rounded-full {simulationActive && simulationLinkUp
+            ? 'bg-green-400'
+            : 'bg-red-400'}"
+        ></span>
+        TB SIM {simulationActive && simulationLinkUp ? "2 NODES" : "DOWN"}
+      </span>
+      <a
+        href="/contract"
+        class="text-xs md:text-sm text-white/70 hover:text-exo-yellow transition-colors tracking-wider uppercase flex items-center gap-1.5 md:gap-2 cursor-pointer"
+        title="Open the Intel vLLM Engine contract console"
+      >
+        Intel vLLM
+      </a>
+    {/if}
     <!-- Mobile right sidebar toggle (instances/models) - only show when not in chat mode -->
     {#if showMobileRightToggle}
       <button

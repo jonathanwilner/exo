@@ -41,6 +41,17 @@ footer {
   line-height: 1.6;
 }
 
+.dashboard-link {
+  color: #ffd447;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+}
+
+.dashboard-link:hover {
+  text-decoration: underline;
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
