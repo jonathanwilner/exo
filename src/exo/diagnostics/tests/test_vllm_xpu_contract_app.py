@@ -448,6 +448,9 @@ def test_security_headers_and_static_client_avoid_active_html_and_storage() -> N
     assert "innerHTML" not in javascript.text
     assert "localStorage" not in javascript.text
     assert "sessionStorage" not in javascript.text
+    assert "Compute 17 times 23. Give only the integer." in response.text
+    assert 'value="0"' in response.text
+    assert ">RUN DEMO</button>" in response.text
     assert (
         'id="max-tokens" type="number" min="1" max="1024" value="1024"' in response.text
     )
