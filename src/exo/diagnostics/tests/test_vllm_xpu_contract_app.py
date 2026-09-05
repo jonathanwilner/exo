@@ -18,10 +18,12 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from exo.diagnostics.vllm_xpu_contract_app import (
+    ACCESS_COOKIE,
     MAX_PROMPT_CHARACTERS,
     BrokerSession,
     ChatRequest,
     ContractRuntime,
+    DemoAuthSettings,
     EngineBroker,
     IntelXpuSysfsDevice,
     SidecarHealthStatus,
@@ -29,13 +31,16 @@ from exo.diagnostics.vllm_xpu_contract_app import (
     ThunderboltSimulationStatus,
     XpuRuntimeStatus,
     create_app,
+    create_demo_password_hash,
     dashboard_directory_from_environment,
+    demo_auth_settings_from_environment,
     evaluate_real_xpu_hardware_gate,
     external_settings_from_environment,
     gather_intel_xpu_sysfs_devices,
     gather_xpu_runtime_status,
     probe_sidecar_health,
     redacted_sidecar_endpoint,
+    verify_demo_password,
 )
 from exo.shared.models.model_cards import ModelId
 from exo.shared.types.chunks import TokenChunk
@@ -55,6 +60,12 @@ from exo.worker.engines.vllm_xpu.sidecar import (
 )
 
 MODEL_ID = ModelId("Qwen/Qwen3-1.7B")
+TEST_PASSWORD = "test-password"
+TEST_PASSWORD_HASH = create_demo_password_hash(
+    TEST_PASSWORD,
+    salt=b"0123456789abcdef",
+    iterations=100_000,
+)
 
 
 class _RunnerArguments(Protocol):
@@ -129,6 +140,13 @@ def ready_xpu_status() -> XpuRuntimeStatus:
                 driver="xe",
             ),
         ),
+    )
+
+
+def protected_auth_settings() -> DemoAuthSettings:
+    return DemoAuthSettings(
+        password_hash=TEST_PASSWORD_HASH,
+        session_secret=b"test-session-secret-is-at-least-32-bytes",
     )
 
 
@@ -457,6 +475,165 @@ def test_security_headers_and_static_client_avoid_active_html_and_storage() -> N
     assert 'id="temperature"' in response.text
     assert "temperature: Number(elements.temperature.value)" in javascript.text
     assert "Maximum token limit reached" in javascript.text
+
+
+def test_hp_login_protects_dashboard_contract_and_api() -> None:
+    runtime = make_real_runtime(EchoTransport())
+    app = create_app(
+        runtime_factory=lambda: runtime,
+        health_probe=healthy_sidecar,
+        xpu_status_provider=ready_xpu_status,
+        auth_settings=protected_auth_settings(),
+    )
+
+    with TestClient(app) as client:
+        dashboard = client.get("/", follow_redirects=False)
+        contract = client.get("/contract", follow_redirects=False)
+        api = client.get("/api/status")
+        cluster_state = client.get("/state")
+        health = client.get("/healthz")
+        readiness = client.get("/readyz")
+        login = client.get("/login")
+        stylesheet = client.get("/vllm-login.css")
+        logo = client.get("/hp-logo.svg")
+
+        rejected = client.post(
+            "/login",
+            data={
+                "identity": "person@example.com",
+                "password": "wrong",
+                "next": "/contract",
+            },
+            follow_redirects=False,
+        )
+        accepted = client.post(
+            "/login",
+            data={
+                "identity": "person@example.com",
+                "password": TEST_PASSWORD,
+                "next": "/contract",
+            },
+            follow_redirects=False,
+        )
+        authenticated_dashboard = client.get("/")
+        authenticated_contract = client.get("/contract")
+        authenticated_api = client.get("/api/status")
+        logged_out = client.post("/logout", follow_redirects=False)
+        api_after_logout = client.get("/api/status")
+
+    assert dashboard.status_code == 303
+    assert dashboard.headers["location"] == "/login?next=/"
+    assert contract.status_code == 303
+    assert contract.headers["location"] == "/login?next=/contract"
+    assert api.status_code == 401
+    assert api.json()["code"] == "access_password_required"
+    assert cluster_state.status_code == 401
+    assert health.status_code == 200
+    assert readiness.status_code == 200
+
+    assert login.status_code == 200
+    assert 'name="identity" type="email"' in login.text
+    assert 'name="password" type="password"' in login.text
+    assert "Exo vLLM Demo" in login.text
+    assert TEST_PASSWORD not in login.text
+    assert "script-src 'none'" in login.headers["content-security-policy"]
+    assert login.headers["cache-control"] == "no-store"
+    assert stylesheet.status_code == 200
+    assert logo.status_code == 200
+
+    assert rejected.status_code == 401
+    assert "not accepted" in rejected.text
+    assert ACCESS_COOKIE not in rejected.cookies
+    assert accepted.status_code == 303
+    assert accepted.headers["location"] == "/contract"
+    assert "HttpOnly" in accepted.headers["set-cookie"]
+    assert "SameSite=strict" in accepted.headers["set-cookie"]
+    assert authenticated_dashboard.status_code == 200
+    assert authenticated_contract.status_code == 200
+    assert authenticated_api.status_code == 200
+    assert logged_out.status_code == 303
+    assert logged_out.headers["location"] == "/login"
+    assert api_after_logout.status_code == 401
+
+
+def test_hp_login_requires_email_escapes_identity_and_rejects_external_redirect() -> (
+    None
+):
+    runtime = make_real_runtime(EchoTransport())
+    app = create_app(
+        runtime_factory=lambda: runtime,
+        health_probe=healthy_sidecar,
+        xpu_status_provider=ready_xpu_status,
+        auth_settings=protected_auth_settings(),
+    )
+
+    with TestClient(app) as client:
+        missing_email = client.post(
+            "/login",
+            data={"identity": "", "password": TEST_PASSWORD, "next": "/"},
+            follow_redirects=False,
+        )
+        unsafe_identity = '"><script>alert(1)</script>@example.com'
+        escaped = client.post(
+            "/login",
+            data={
+                "identity": unsafe_identity,
+                "password": "wrong",
+                "next": "/",
+            },
+            follow_redirects=False,
+        )
+        external_redirect = client.post(
+            "/login",
+            data={
+                "identity": "person@example.com",
+                "password": TEST_PASSWORD,
+                "next": "//example.invalid",
+            },
+            follow_redirects=False,
+        )
+
+    assert missing_email.status_code == 401
+    assert escaped.status_code == 401
+    assert unsafe_identity not in escaped.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in escaped.text
+    assert external_redirect.status_code == 303
+    assert external_redirect.headers["location"] == "/"
+
+
+def test_hp_login_secure_cookie_and_password_hash_contract() -> None:
+    runtime = make_real_runtime(EchoTransport())
+    app = create_app(
+        runtime_factory=lambda: runtime,
+        health_probe=healthy_sidecar,
+        xpu_status_provider=ready_xpu_status,
+        auth_settings=protected_auth_settings(),
+    )
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/login",
+            data={
+                "identity": "person@example.com",
+                "password": TEST_PASSWORD,
+                "next": "/",
+            },
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+
+    assert "Secure" in accepted.headers["set-cookie"]
+    assert TEST_PASSWORD not in TEST_PASSWORD_HASH
+    assert verify_demo_password(TEST_PASSWORD, TEST_PASSWORD_HASH) is True
+    assert verify_demo_password("wrong", TEST_PASSWORD_HASH) is False
+    assert (
+        demo_auth_settings_from_environment(
+            {"EXO_VLLM_DEMO_PASSWORD_HASH": TEST_PASSWORD_HASH}
+        ).enabled
+        is True
+    )
+    with pytest.raises(ValueError, match="invalid format"):
+        DemoAuthSettings(password_hash="plaintext-is-not-accepted")
 
 
 def test_dashboard_mode_serves_real_dashboard_and_two_node_simulation(

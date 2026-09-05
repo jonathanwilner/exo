@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import hashlib
+import hmac
+import html
 import importlib
 import json
 import os
 import queue
+import secrets
 import threading
+import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -15,12 +22,18 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol, cast, final
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 from anyio import create_task_group, to_thread
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field, field_validator
 from starlette.middleware.base import RequestResponseEndpoint
@@ -64,6 +77,10 @@ DEFAULT_HEALTH_TIMEOUT_SECONDS = 1.0
 DEFAULT_SIMULATION_STATUS_PATH = Path("/run/exo-thunderbolt-simulation/status.json")
 REAL_NODE_ID = "slazenger-panther-lake"
 SIMULATED_NODE_ID = "thunderbolt-peer-simulated"
+ACCESS_COOKIE = "exo_vllm_demo_session"
+ACCESS_SESSION_SECONDS = 12 * 60 * 60
+PASSWORD_HASH_ITERATIONS = 600_000
+MAX_LOGIN_BODY_BYTES = 4_096
 
 STATIC_DIRECTORY = Path(__file__).with_name("static")
 SECURITY_HEADERS: Mapping[str, str] = {
@@ -90,11 +107,242 @@ DASHBOARD_SECURITY_HEADERS: Mapping[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
 }
+LOGIN_SECURITY_HEADERS: Mapping[str, str] = {
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'none'; style-src 'self'; "
+        "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    ),
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
 
 SessionState = Literal["active", "finished", "cancelled", "failed"]
 CancelDisposition = Literal["accepted", "unknown", "terminal"]
 TorchState = Literal["available", "unavailable", "not-installed", "error"]
 type BrokerResult = SidecarResult | BrokerFailure
+
+
+@dataclass(frozen=True)
+class DemoAuthSettings:
+    password_hash: str | None = None
+    session_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
+    session_seconds: int = ACCESS_SESSION_SECONDS
+
+    def __post_init__(self) -> None:
+        if self.password_hash is not None:
+            _parse_password_hash(self.password_hash)
+        if len(self.session_secret) < 32:
+            raise ValueError("demo session secret must contain at least 32 bytes")
+        if not 1 <= self.session_seconds <= ACCESS_SESSION_SECONDS:
+            raise ValueError("demo session duration is outside the supported range")
+
+    @property
+    def enabled(self) -> bool:
+        return self.password_hash is not None
+
+
+def _base64_without_padding(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _decode_base64_without_padding(value: str) -> bytes:
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    try:
+        return base64.b64decode(
+            value + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("demo password hash contains invalid base64") from error
+
+
+def create_demo_password_hash(
+    password: str,
+    *,
+    salt: bytes | None = None,
+    iterations: int = PASSWORD_HASH_ITERATIONS,
+) -> str:
+    if not password:
+        raise ValueError("demo password cannot be empty")
+    if not 100_000 <= iterations <= 2_000_000:
+        raise ValueError(
+            "demo password hash iterations are outside the supported range"
+        )
+    resolved_salt = secrets.token_bytes(16) if salt is None else salt
+    if len(resolved_salt) < 16:
+        raise ValueError("demo password hash salt must contain at least 16 bytes")
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        resolved_salt,
+        iterations,
+    )
+    return "$".join(
+        (
+            "pbkdf2_sha256",
+            str(iterations),
+            _base64_without_padding(resolved_salt),
+            _base64_without_padding(digest),
+        )
+    )
+
+
+def _parse_password_hash(encoded_hash: str) -> tuple[int, bytes, bytes]:
+    try:
+        algorithm, iterations_text, salt_text, digest_text = encoded_hash.split("$")
+        iterations = int(iterations_text)
+    except ValueError as error:
+        raise ValueError("demo password hash has an invalid format") from error
+    if algorithm != "pbkdf2_sha256":
+        raise ValueError("demo password hash uses an unsupported algorithm")
+    if not 100_000 <= iterations <= 2_000_000:
+        raise ValueError(
+            "demo password hash iterations are outside the supported range"
+        )
+    salt = _decode_base64_without_padding(salt_text)
+    digest = _decode_base64_without_padding(digest_text)
+    if len(salt) < 16 or len(digest) != hashlib.sha256().digest_size:
+        raise ValueError("demo password hash has invalid salt or digest length")
+    return iterations, salt, digest
+
+
+def verify_demo_password(password: str, encoded_hash: str) -> bool:
+    iterations, salt, expected = _parse_password_hash(encoded_hash)
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+    )
+    return hmac.compare_digest(actual, expected)
+
+
+def demo_auth_settings_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> DemoAuthSettings:
+    values = os.environ if environment is None else environment
+    password_hash = values.get("EXO_VLLM_DEMO_PASSWORD_HASH", "").strip() or None
+    return DemoAuthSettings(password_hash=password_hash)
+
+
+def _create_access_token(settings: DemoAuthSettings, now: int | None = None) -> str:
+    current = int(time.time()) if now is None else now
+    expires_at = current + settings.session_seconds
+    nonce = secrets.token_urlsafe(12)
+    payload = f"v1:{expires_at}:{nonce}"
+    signature = hmac.new(
+        settings.session_secret,
+        payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{expires_at}.{nonce}.{signature}"
+
+
+def _verify_access_token(
+    token: str | None,
+    settings: DemoAuthSettings,
+    now: int | None = None,
+) -> bool:
+    if not token:
+        return False
+    try:
+        expires_text, nonce, signature = token.split(".", 2)
+        expires_at = int(expires_text)
+    except (TypeError, ValueError):
+        return False
+    current = int(time.time()) if now is None else now
+    if expires_at < current or expires_at > current + settings.session_seconds:
+        return False
+    payload = f"v1:{expires_at}:{nonce}"
+    expected = hmac.new(
+        settings.session_secret,
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def _safe_next(value: str | None) -> str:
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/"
+    if any(character in value for character in ("\r", "\n", "\x00")):
+        return "/"
+    return value
+
+
+def _valid_email(value: str) -> bool:
+    if not value or len(value) > 120 or any(character.isspace() for character in value):
+        return False
+    local, separator, domain = value.rpartition("@")
+    return bool(separator and local and domain and "." in domain)
+
+
+def _login_page(
+    next_path: str = "/",
+    *,
+    failed: bool = False,
+    identity: str = "",
+) -> str:
+    error = (
+        '<p class="error" role="alert">The email or password was not accepted.</p>'
+        if failed
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Intel AI PC Demo Login</title>
+  <link rel="stylesheet" href="/vllm-login.css?v=1">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="brand-bar">
+      <a class="brand-lockup" href="/login" aria-label="HP Intel AI PC demo login">
+        <img src="/hp-logo.svg?v=1" alt="HP">
+        <span>Intel AI PC Demo</span>
+      </a>
+      <span class="security-label">Protected application</span>
+    </header>
+    <main class="login-layout">
+      <section class="login-card">
+        <div class="section-marker" aria-hidden="true"></div>
+        <p class="eyebrow">Panther Lake local AI</p>
+        <h1>Exo vLLM Demo</h1>
+        <p class="intro">Sign in to view the two-node Thunderbolt simulation and run the model on the Intel XPU.</p>
+        {error}
+        <form method="post" action="/login">
+          <input type="hidden" name="next" value="{html.escape(next_path, quote=True)}">
+          <label for="identity">Email</label>
+          <input id="identity" name="identity" type="email" maxlength="120" autocomplete="username" placeholder="name@example.com" value="{html.escape(identity, quote=True)}" required autofocus>
+          <label for="password">Access password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <button type="submit">
+            <span>Continue</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </button>
+        </form>
+        <p class="access-note">Authorized HP demonstration users only.</p>
+      </section>
+      <aside class="brand-stage" aria-label="Intel AI PC demonstration">
+        <div class="stripe stripe-one"></div>
+        <div class="stripe stripe-two"></div>
+        <div class="stage-copy">
+          <p>HP Consumer AI</p>
+          <h2>Local AI.<br>Real Intel XPU.</h2>
+          <span>Exo cluster view. vLLM Engine contract. Panther Lake hardware.</span>
+        </div>
+      </aside>
+    </main>
+  </div>
+</body>
+</html>"""
 
 
 @final
@@ -773,8 +1021,10 @@ def create_app(
     xpu_status_provider: XpuStatusProvider = gather_xpu_runtime_status,
     simulation_status_provider: SimulationStatusProvider | None = None,
     dashboard_directory: Path | None = None,
+    auth_settings: DemoAuthSettings | None = None,
 ) -> FastAPI:
     context: tuple[ContractRuntime, EngineBroker] | None = None
+    resolved_auth_settings = auth_settings or demo_auth_settings_from_environment()
     resolved_dashboard_directory = (
         dashboard_directory
         if dashboard_directory is not None
@@ -820,16 +1070,52 @@ def create_app(
         lifespan=lifespan,
     )
 
-    async def add_security_headers(
+    async def protect_application_and_add_security_headers(
         request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        response = await call_next(request)
+        public_path = request.url.path in {
+            "/login",
+            "/vllm-login.css",
+            "/hp-logo.svg",
+            "/healthz",
+            "/readyz",
+        }
+        authenticated = _verify_access_token(
+            request.cookies.get(ACCESS_COOKIE),
+            resolved_auth_settings,
+        )
+        if resolved_auth_settings.enabled and not public_path and not authenticated:
+            api_path = request.url.path.startswith(("/api/", "/v1/")) or (
+                request.url.path in {"/state", "/node_id", "/onboarding", "/models"}
+            )
+            if api_path:
+                response = JSONResponse(
+                    {
+                        "status": 401,
+                        "code": "access_password_required",
+                        "detail": "Sign in to access the Exo Intel AI PC demo.",
+                    },
+                    status_code=401,
+                )
+            else:
+                destination = request.url.path
+                if request.url.query:
+                    destination = f"{destination}?{request.url.query}"
+                response = RedirectResponse(
+                    f"/login?next={quote(_safe_next(destination), safe='/')}",
+                    status_code=303,
+                )
+        else:
+            response = await call_next(request)
         contract_path = (
             request.url.path == "/contract"
             or (request.url.path == "/" and resolved_dashboard_directory is None)
             or request.url.path.startswith(("/api/", "/vllm-xpu"))
         )
-        headers = SECURITY_HEADERS if contract_path else DASHBOARD_SECURITY_HEADERS
+        if request.url.path in {"/login", "/vllm-login.css", "/hp-logo.svg"}:
+            headers = LOGIN_SECURITY_HEADERS
+        else:
+            headers = SECURITY_HEADERS if contract_path else DASHBOARD_SECURITY_HEADERS
         for name, value in headers.items():
             response.headers[name] = value
         return response
@@ -844,6 +1130,60 @@ def create_app(
 
     async def stylesheet() -> FileResponse:
         return FileResponse(STATIC_DIRECTORY / "vllm-xpu.css", media_type="text/css")
+
+    async def login_stylesheet() -> FileResponse:
+        return FileResponse(STATIC_DIRECTORY / "vllm-login.css", media_type="text/css")
+
+    async def hp_logo() -> FileResponse:
+        return FileResponse(
+            STATIC_DIRECTORY / "hp-logo.svg", media_type="image/svg+xml"
+        )
+
+    async def login(request: Request) -> Response:
+        next_path = _safe_next(request.query_params.get("next"))
+        if not resolved_auth_settings.enabled or _verify_access_token(
+            request.cookies.get(ACCESS_COOKIE),
+            resolved_auth_settings,
+        ):
+            return RedirectResponse(next_path, status_code=303)
+        return HTMLResponse(_login_page(next_path))
+
+    async def login_submit(request: Request) -> Response:
+        body = await request.body()
+        if len(body) > MAX_LOGIN_BODY_BYTES:
+            return HTMLResponse(_login_page(failed=True), status_code=400)
+        form = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        next_path = _safe_next(form.get("next", ["/"])[0])
+        identity = form.get("identity", [""])[0].strip()
+        submitted = form.get("password", [""])[0]
+        password_hash = resolved_auth_settings.password_hash
+        accepted = (
+            _valid_email(identity)
+            and password_hash is not None
+            and verify_demo_password(submitted, password_hash)
+        )
+        if not accepted:
+            return HTMLResponse(
+                _login_page(next_path, failed=True, identity=identity[:120]),
+                status_code=401,
+            )
+        response = RedirectResponse(next_path, status_code=303)
+        forwarded_scheme = request.headers.get("X-Forwarded-Proto", "")
+        response.set_cookie(
+            ACCESS_COOKIE,
+            _create_access_token(resolved_auth_settings),
+            max_age=resolved_auth_settings.session_seconds,
+            httponly=True,
+            secure=request.url.scheme == "https" or forwarded_scheme == "https",
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    async def logout() -> Response:
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(ACCESS_COOKIE, path="/")
+        return response
 
     async def healthz() -> dict[str, str]:
         return {"status": "alive"}
@@ -997,7 +1337,7 @@ def create_app(
                     status_code=404,
                 )
 
-    app.middleware("http")(add_security_headers)
+    app.middleware("http")(protect_application_and_add_security_headers)
     if resolved_dashboard_directory is None:
         app.add_api_route("/", contract_index, methods=["GET"], include_in_schema=False)
     app.add_api_route(
@@ -1009,6 +1349,16 @@ def create_app(
     app.add_api_route(
         "/vllm-xpu.css", stylesheet, methods=["GET"], include_in_schema=False
     )
+    app.add_api_route("/login", login, methods=["GET"], include_in_schema=False)
+    app.add_api_route("/login", login_submit, methods=["POST"], include_in_schema=False)
+    app.add_api_route("/logout", logout, methods=["POST"], include_in_schema=False)
+    app.add_api_route(
+        "/vllm-login.css",
+        login_stylesheet,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+    app.add_api_route("/hp-logo.svg", hp_logo, methods=["GET"], include_in_schema=False)
     app.add_api_route("/healthz", healthz, methods=["GET"])
     app.add_api_route("/readyz", readyz, methods=["GET"], response_model=None)
     app.add_api_route(
